@@ -1,7 +1,7 @@
 package routes
 
 import (
-	"jwt-poc/handlers"
+	"jwt-poc/app/api/handlers"
 	"jwt-poc/middlewares"
 
 	"github.com/gofiber/fiber/v2"

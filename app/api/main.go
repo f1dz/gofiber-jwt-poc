@@ -1,8 +1,8 @@
 package main
 
 import (
+	"jwt-poc/app/api/routes"
 	"jwt-poc/config"
-	"jwt-poc/routes"
 	"os"
 
 	"github.com/gofiber/fiber/v2"
