@@ -10,7 +10,7 @@ myapp/
 ├── internal/
 │   ├── domain/
 │   │   ├── entity/
-│   │   │   └── user.go
+│   │   │   └── user.go              # Clean entity, no external dependencies
 │   │   └── repository/
 │   │       └── user_repository.go
 │   ├── usecase/
@@ -25,6 +25,8 @@ myapp/
 │   │           └── route.go
 │   └── repository/
 │       └── postgres/
+│           ├── model/
+│           │   └── user_model.go    # Database model with GORM tags
 │           └── user_repository.go
 ├── pkg/
 │   ├── database/
@@ -219,25 +221,91 @@ func NotFound(c *fiber.Ctx, message string) error {
 }
 ```
 
-## 6. internal/domain/entity/user.go
+## 6. internal/domain/entity/user.go (Clean - Tanpa Dependency)
 
 ```go
 package entity
 
+import "time"
+
+// User adalah domain entity yang clean, tanpa dependency eksternal
+type User struct {
+    ID        uint
+    Name      string
+    Email     string
+    Password  string
+    CreatedAt time.Time
+    UpdatedAt time.Time
+    DeletedAt *time.Time
+}
+
+// Business logic methods bisa ditambahkan di sini
+func (u *User) IsDeleted() bool {
+    return u.DeletedAt != nil
+}
+```
+
+## 6b. internal/repository/postgres/model/user_model.go (Database Model)
+
+```go
+package model
+
 import (
+    "myapp/internal/domain/entity"
     "time"
 
     "gorm.io/gorm"
 )
 
-type User struct {
-    ID        uint           `gorm:"primarykey" json:"id"`
-    Name      string         `gorm:"size:255;not null" json:"name"`
-    Email     string         `gorm:"size:255;uniqueIndex;not null" json:"email"`
-    Password  string         `gorm:"size:255;not null" json:"-"`
-    CreatedAt time.Time      `json:"created_at"`
-    UpdatedAt time.Time      `json:"updated_at"`
-    DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+// UserModel adalah representasi database dari User entity
+// Model ini boleh menggunakan GORM tags karena ada di layer infrastructure
+type UserModel struct {
+    ID        uint           `gorm:"primarykey"`
+    Name      string         `gorm:"size:255;not null"`
+    Email     string         `gorm:"size:255;uniqueIndex;not null"`
+    Password  string         `gorm:"size:255;not null"`
+    CreatedAt time.Time
+    UpdatedAt time.Time
+    DeletedAt gorm.DeletedAt `gorm:"index"`
+}
+
+func (UserModel) TableName() string {
+    return "users"
+}
+
+// ToEntity converts database model to domain entity
+func (m *UserModel) ToEntity() *entity.User {
+    var deletedAt *time.Time
+    if m.DeletedAt.Valid {
+        deletedAt = &m.DeletedAt.Time
+    }
+
+    return &entity.User{
+        ID:        m.ID,
+        Name:      m.Name,
+        Email:     m.Email,
+        Password:  m.Password,
+        CreatedAt: m.CreatedAt,
+        UpdatedAt: m.UpdatedAt,
+        DeletedAt: deletedAt,
+    }
+}
+
+// FromEntity converts domain entity to database model
+func (m *UserModel) FromEntity(user *entity.User) {
+    m.ID = user.ID
+    m.Name = user.Name
+    m.Email = user.Email
+    m.Password = user.Password
+    m.CreatedAt = user.CreatedAt
+    m.UpdatedAt = user.UpdatedAt
+    
+    if user.DeletedAt != nil {
+        m.DeletedAt = gorm.DeletedAt{
+            Time:  *user.DeletedAt,
+            Valid: true,
+        }
+    }
 }
 ```
 
@@ -261,7 +329,7 @@ type UserRepository interface {
 }
 ```
 
-## 8. internal/repository/postgres/user_repository.go
+## 8. internal/repository/postgres/user_repository.go (Updated)
 
 ```go
 package postgres
@@ -270,6 +338,7 @@ import (
     "context"
     "myapp/internal/domain/entity"
     "myapp/internal/domain/repository"
+    "myapp/internal/repository/postgres/model"
 
     "gorm.io/gorm"
 )
@@ -283,39 +352,65 @@ func NewUserRepository(db *gorm.DB) repository.UserRepository {
 }
 
 func (r *userRepository) Create(ctx context.Context, user *entity.User) error {
-    return r.db.WithContext(ctx).Create(user).Error
+    var userModel model.UserModel
+    userModel.FromEntity(user)
+    
+    if err := r.db.WithContext(ctx).Create(&userModel).Error; err != nil {
+        return err
+    }
+    
+    // Update entity with generated ID and timestamps
+    *user = *userModel.ToEntity()
+    return nil
 }
 
 func (r *userRepository) FindByID(ctx context.Context, id uint) (*entity.User, error) {
-    var user entity.User
-    err := r.db.WithContext(ctx).First(&user, id).Error
+    var userModel model.UserModel
+    err := r.db.WithContext(ctx).First(&userModel, id).Error
     if err != nil {
         return nil, err
     }
-    return &user, nil
+    return userModel.ToEntity(), nil
 }
 
 func (r *userRepository) FindByEmail(ctx context.Context, email string) (*entity.User, error) {
-    var user entity.User
-    err := r.db.WithContext(ctx).Where("email = ?", email).First(&user).Error
+    var userModel model.UserModel
+    err := r.db.WithContext(ctx).Where("email = ?", email).First(&userModel).Error
     if err != nil {
         return nil, err
     }
-    return &user, nil
+    return userModel.ToEntity(), nil
 }
 
 func (r *userRepository) FindAll(ctx context.Context) ([]entity.User, error) {
-    var users []entity.User
-    err := r.db.WithContext(ctx).Find(&users).Error
-    return users, err
+    var userModels []model.UserModel
+    err := r.db.WithContext(ctx).Find(&userModels).Error
+    if err != nil {
+        return nil, err
+    }
+    
+    users := make([]entity.User, len(userModels))
+    for i, um := range userModels {
+        users[i] = *um.ToEntity()
+    }
+    
+    return users, nil
 }
 
 func (r *userRepository) Update(ctx context.Context, user *entity.User) error {
-    return r.db.WithContext(ctx).Save(user).Error
+    var userModel model.UserModel
+    userModel.FromEntity(user)
+    
+    if err := r.db.WithContext(ctx).Save(&userModel).Error; err != nil {
+        return err
+    }
+    
+    *user = *userModel.ToEntity()
+    return nil
 }
 
 func (r *userRepository) Delete(ctx context.Context, id uint) error {
-    return r.db.WithContext(ctx).Delete(&entity.User{}, id).Error
+    return r.db.WithContext(ctx).Delete(&model.UserModel{}, id).Error
 }
 ```
 
@@ -553,8 +648,8 @@ import (
     "myapp/config"
     "myapp/internal/delivery/http/handler"
     "myapp/internal/delivery/http/route"
-    "myapp/internal/domain/entity"
     "myapp/internal/repository/postgres"
+    "myapp/internal/repository/postgres/model"
     "myapp/internal/usecase"
     "myapp/pkg/database"
 
@@ -577,8 +672,8 @@ func main() {
         log.Fatal("Failed to connect to database:", err)
     }
 
-    // Auto migrate
-    if err := db.AutoMigrate(&entity.User{}); err != nil {
+    // Auto migrate - gunakan database model, bukan entity
+    if err := db.AutoMigrate(&model.UserModel{}); err != nil {
         log.Fatal("Failed to migrate database:", err)
     }
 
@@ -668,14 +763,49 @@ curl -X DELETE http://localhost:3000/api/v1/users/1
 
 ## Penjelasan Clean Architecture
 
+**Perubahan Penting - Entity yang Benar-benar Clean:**
+
+Sekarang struktur sudah mengikuti prinsip Clean Architecture dengan benar:
+
+1. **Domain Entity (`internal/domain/entity/user.go`)**: 
+   - **Benar-benar clean**, tidak ada dependency eksternal (GORM, JSON tags, dll)
+   - Hanya berisi business logic murni
+   - Tidak tahu tentang database atau framework apapun
+
+2. **Database Model (`internal/repository/postgres/model/user_model.go`)**:
+   - Boleh menggunakan GORM tags karena ada di **infrastructure layer**
+   - Berisi converter methods: `ToEntity()` dan `FromEntity()`
+   - Bertanggung jawab untuk mapping antara database dan domain
+
+3. **Repository Implementation**:
+   - Bekerja dengan database model
+   - Convert ke/dari domain entity
+   - Domain layer tidak tahu tentang GORM
+
 **Layer-layer:**
-- **Domain/Entity**: Business entities dan interface repository
-- **Repository**: Implementasi database operations
-- **Usecase**: Business logic layer
+- **Domain/Entity**: Business entities (CLEAN, no external deps)
+- **Domain/Repository Interface**: Contract untuk data access
+- **Repository Implementation**: Database operations dengan model mapping
+- **Usecase**: Business logic menggunakan domain entity
 - **Delivery/Handler**: HTTP handlers dan routing
 
-**Keuntungan:**
-- Separation of concerns
-- Testable
-- Independent dari framework
-- Mudah maintenance dan scalable
+**Keuntungan Pendekatan Ini:**
+- ✅ Domain entity benar-benar independen
+- ✅ Mudah testing (mock tanpa database)
+- ✅ Bisa ganti ORM tanpa ubah domain
+- ✅ Separation of concerns yang jelas
+- ✅ Scalable dan maintainable
+
+**Trade-off:**
+- Butuh mapping code (ToEntity/FromEntity)
+- Sedikit lebih verbose
+- Tapi lebih flexible dan testable!
+
+## Pendekatan Alternatif (Pragmatic)
+
+Jika ingin lebih pragmatis untuk project kecil-menengah, bisa pakai struct tags tapi dengan catatan:
+- Gunakan tags yang framework-agnostic seperti `json`
+- Atau terima bahwa ini "pragmatic clean architecture"
+- Cocok untuk rapid development
+
+Tapi untuk project besar atau yang butuh flexibility tinggi, **pisahkan entity dan model seperti di atas adalah pilihan terbaik**.
