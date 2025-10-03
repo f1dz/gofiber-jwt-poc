@@ -316,7 +316,15 @@ package repository
 
 import (
     "context"
+    "errors"
     "myapp/internal/domain/entity"
+)
+
+// Domain errors yang bisa digunakan di seluruh aplikasi
+var (
+    ErrNotFound      = errors.New("record not found")
+    ErrDuplicateKey  = errors.New("duplicate key")
+    ErrInvalidInput  = errors.New("invalid input")
 )
 
 type UserRepository interface {
@@ -336,6 +344,7 @@ package postgres
 
 import (
     "context"
+    "errors"
     "myapp/internal/domain/entity"
     "myapp/internal/domain/repository"
     "myapp/internal/repository/postgres/model"
@@ -356,7 +365,8 @@ func (r *userRepository) Create(ctx context.Context, user *entity.User) error {
     userModel.FromEntity(user)
     
     if err := r.db.WithContext(ctx).Create(&userModel).Error; err != nil {
-        return err
+        // Convert GORM errors ke domain errors
+        return r.handleError(err)
     }
     
     // Update entity with generated ID and timestamps
@@ -368,7 +378,7 @@ func (r *userRepository) FindByID(ctx context.Context, id uint) (*entity.User, e
     var userModel model.UserModel
     err := r.db.WithContext(ctx).First(&userModel, id).Error
     if err != nil {
-        return nil, err
+        return nil, r.handleError(err)
     }
     return userModel.ToEntity(), nil
 }
@@ -377,7 +387,7 @@ func (r *userRepository) FindByEmail(ctx context.Context, email string) (*entity
     var userModel model.UserModel
     err := r.db.WithContext(ctx).Where("email = ?", email).First(&userModel).Error
     if err != nil {
-        return nil, err
+        return nil, r.handleError(err)
     }
     return userModel.ToEntity(), nil
 }
@@ -386,7 +396,7 @@ func (r *userRepository) FindAll(ctx context.Context) ([]entity.User, error) {
     var userModels []model.UserModel
     err := r.db.WithContext(ctx).Find(&userModels).Error
     if err != nil {
-        return nil, err
+        return nil, r.handleError(err)
     }
     
     users := make([]entity.User, len(userModels))
@@ -402,7 +412,7 @@ func (r *userRepository) Update(ctx context.Context, user *entity.User) error {
     userModel.FromEntity(user)
     
     if err := r.db.WithContext(ctx).Save(&userModel).Error; err != nil {
-        return err
+        return r.handleError(err)
     }
     
     *user = *userModel.ToEntity()
@@ -410,11 +420,31 @@ func (r *userRepository) Update(ctx context.Context, user *entity.User) error {
 }
 
 func (r *userRepository) Delete(ctx context.Context, id uint) error {
-    return r.db.WithContext(ctx).Delete(&model.UserModel{}, id).Error
+    err := r.db.WithContext(ctx).Delete(&model.UserModel{}, id).Error
+    return r.handleError(err)
+}
+
+// handleError converts GORM-specific errors to domain errors
+// Ini adalah KUNCI: Repository bertanggung jawab untuk error translation
+func (r *userRepository) handleError(err error) error {
+    if err == nil {
+        return nil
+    }
+    
+    // Convert GORM errors ke domain errors
+    if errors.Is(err, gorm.ErrRecordNotFound) {
+        return repository.ErrNotFound
+    }
+    
+    // Bisa tambahkan handling untuk error lain
+    // misalnya duplicate key, foreign key constraint, dll
+    
+    // Return original error jika tidak bisa di-convert
+    return err
 }
 ```
 
-## 9. internal/usecase/user_usecase.go
+## 9. internal/usecase/user_usecase.go (Clean - Tanpa GORM)
 
 ```go
 package usecase
@@ -424,8 +454,12 @@ import (
     "errors"
     "myapp/internal/domain/entity"
     "myapp/internal/domain/repository"
+)
 
-    "gorm.io/gorm"
+var (
+    ErrUserNotFound      = errors.New("user not found")
+    ErrEmailAlreadyExists = errors.New("email already exists")
+    ErrInvalidInput      = errors.New("invalid input")
 )
 
 type UserUsecase interface {
@@ -449,13 +483,18 @@ func NewUserUsecase(userRepo repository.UserRepository) UserUsecase {
 func (u *userUsecase) Create(ctx context.Context, user *entity.User) error {
     // Business logic validation
     if user.Name == "" || user.Email == "" {
-        return errors.New("name and email are required")
+        return ErrInvalidInput
     }
 
     // Check if email already exists
+    // Repository harus return error yang jelas (bukan GORM error)
     _, err := u.userRepo.FindByEmail(ctx, user.Email)
     if err == nil {
-        return errors.New("email already exists")
+        return ErrEmailAlreadyExists
+    }
+    // Jika error bukan "not found", berarti error lain
+    if err != repository.ErrNotFound {
+        return err
     }
 
     return u.userRepo.Create(ctx, user)
@@ -464,8 +503,10 @@ func (u *userUsecase) Create(ctx context.Context, user *entity.User) error {
 func (u *userUsecase) GetByID(ctx context.Context, id uint) (*entity.User, error) {
     user, err := u.userRepo.FindByID(ctx, id)
     if err != nil {
-        if errors.Is(err, gorm.ErrRecordNotFound) {
-            return nil, errors.New("user not found")
+        // Usecase tidak tahu tentang GORM errors
+        // Repository bertanggung jawab convert GORM error ke domain error
+        if err == repository.ErrNotFound {
+            return nil, ErrUserNotFound
         }
         return nil, err
     }
@@ -477,11 +518,16 @@ func (u *userUsecase) GetAll(ctx context.Context) ([]entity.User, error) {
 }
 
 func (u *userUsecase) Update(ctx context.Context, user *entity.User) error {
+    // Business logic: validate input
+    if user.Name == "" || user.Email == "" {
+        return ErrInvalidInput
+    }
+
     // Check if user exists
     _, err := u.userRepo.FindByID(ctx, user.ID)
     if err != nil {
-        if errors.Is(err, gorm.ErrRecordNotFound) {
-            return errors.New("user not found")
+        if err == repository.ErrNotFound {
+            return ErrUserNotFound
         }
         return err
     }
@@ -493,8 +539,8 @@ func (u *userUsecase) Delete(ctx context.Context, id uint) error {
     // Check if user exists
     _, err := u.userRepo.FindByID(ctx, id)
     if err != nil {
-        if errors.Is(err, gorm.ErrRecordNotFound) {
-            return errors.New("user not found")
+        if err == repository.ErrNotFound {
+            return ErrUserNotFound
         }
         return err
     }
@@ -763,7 +809,7 @@ curl -X DELETE http://localhost:3000/api/v1/users/1
 
 ## Penjelasan Clean Architecture
 
-**Perubahan Penting - Entity yang Benar-benar Clean:**
+**Perubahan Penting - Usecase yang Benar-benar Clean:**
 
 Sekarang struktur sudah mengikuti prinsip Clean Architecture dengan benar:
 
@@ -772,29 +818,84 @@ Sekarang struktur sudah mengikuti prinsip Clean Architecture dengan benar:
    - Hanya berisi business logic murni
    - Tidak tahu tentang database atau framework apapun
 
-2. **Database Model (`internal/repository/postgres/model/user_model.go`)**:
+2. **Domain Repository Interface (`internal/domain/repository/user_repository.go`)**:
+   - Mendefinisikan **domain errors** (`ErrNotFound`, dll) yang framework-agnostic
+   - Interface contract tanpa dependency eksternal
+   - Tidak tahu tentang GORM
+
+3. **Use Case (`internal/usecase/user_usecase.go`)**:
+   - **TIDAK import GORM** atau library database lainnya
+   - Hanya bekerja dengan domain entity dan repository interface
+   - Menggunakan domain errors, bukan GORM errors
+   - Pure business logic
+
+4. **Repository Implementation (`internal/repository/postgres/user_repository.go`)**:
+   - **Satu-satunya tempat yang boleh import GORM**
+   - Bertanggung jawab untuk **error translation**: GORM errors → Domain errors
+   - Method `handleError()` mengkonversi error
+   - Bekerja dengan database model
+
+5. **Database Model (`internal/repository/postgres/model/user_model.go`)**:
    - Boleh menggunakan GORM tags karena ada di **infrastructure layer**
    - Berisi converter methods: `ToEntity()` dan `FromEntity()`
    - Bertanggung jawab untuk mapping antara database dan domain
 
-3. **Repository Implementation**:
-   - Bekerja dengan database model
-   - Convert ke/dari domain entity
-   - Domain layer tidak tahu tentang GORM
+**Alur Error Handling yang Benar:**
+```
+GORM Error (gorm.ErrRecordNotFound)
+    ↓ [Repository converts]
+Domain Error (repository.ErrNotFound)
+    ↓ [Usecase handles]
+Usecase Error (usecase.ErrUserNotFound)
+    ↓ [Handler converts]
+HTTP Response (404 Not Found)
+```
 
 **Layer-layer:**
 - **Domain/Entity**: Business entities (CLEAN, no external deps)
-- **Domain/Repository Interface**: Contract untuk data access
-- **Repository Implementation**: Database operations dengan model mapping
-- **Usecase**: Business logic menggunakan domain entity
+- **Domain/Repository Interface**: Contract + Domain Errors (CLEAN)
+- **Usecase**: Business logic (CLEAN, no GORM/DB libs)
+- **Repository Implementation**: Database operations + Error translation (boleh pakai GORM)
+- **Database Model**: ORM mappings (boleh pakai GORM tags)
 - **Delivery/Handler**: HTTP handlers dan routing
+
+**Dependency Rule:**
+```
+┌─────────────────────────────────────────┐
+│  Entities (Pure Go, no dependencies)   │ ← Innermost
+├─────────────────────────────────────────┤
+│  Use Cases (domain errors only)        │
+├─────────────────────────────────────────┤
+│  Interface Adapters (Repository Interface)│
+├─────────────────────────────────────────┤
+│  Frameworks & Drivers (GORM, Fiber)    │ ← Outermost
+└─────────────────────────────────────────┘
+
+Dependencies always point INWARD →
+```
 
 **Keuntungan Pendekatan Ini:**
 - ✅ Domain entity benar-benar independen
+- ✅ **Usecase tidak tahu tentang GORM atau database apapun**
+- ✅ **Error handling yang clean dengan domain errors**
 - ✅ Mudah testing (mock tanpa database)
-- ✅ Bisa ganti ORM tanpa ubah domain
+- ✅ Bisa ganti ORM (GORM → SQLx → sqlc) tanpa ubah usecase
+- ✅ Bisa ganti database (PostgreSQL → MySQL → MongoDB) tanpa ubah usecase
 - ✅ Separation of concerns yang jelas
 - ✅ Scalable dan maintainable
+
+**Yang Boleh Import GORM:**
+- ❌ Domain Entity → TIDAK
+- ❌ Repository Interface → TIDAK
+- ❌ Use Case → TIDAK
+- ❌ Handler → TIDAK
+- ✅ Repository Implementation → YA (hanya di sini!)
+- ✅ Database Model → YA
+
+**Prinsip Penting:**
+> "Inner layers should not depend on outer layers"
+> Usecase adalah inner layer, GORM adalah outer layer
+> Jadi Usecase TIDAK BOLEH depend on GORM
 
 **Trade-off:**
 - Butuh mapping code (ToEntity/FromEntity)
