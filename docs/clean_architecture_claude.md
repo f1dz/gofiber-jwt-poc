@@ -24,7 +24,10 @@ myapp/
 │   │       ├── middleware/
 │   │       │   └── auth_middleware.go
 │   │       └── route/
-│   │           └── route.go
+│   │           ├── route.go           # Main route setup
+│   │           ├── user_route.go      # User routes (modular!)
+│   │           ├── product_route.go   # Product routes
+│   │           └── order_route.go     # Order routes
 │   └── repository/
 │       └── postgres/
 │           ├── model/
@@ -656,7 +659,32 @@ func (h *UserHandler) Delete(c *fiber.Ctx) error {
 }
 ```
 
-## 12c. internal/delivery/http/route/route.go (OPSIONAL - Bisa Dihapus)
+## 12c. internal/delivery/http/route/route.go (Main Router)
+
+```go
+package route
+
+import (
+    "myapp/internal/app"
+
+    "github.com/gofiber/fiber/v2"
+)
+
+// SetupRoutes sets up all application routes
+func SetupRoutes(fiberApp *fiber.App, application *app.Application) {
+    // API v1 group
+    api := fiberApp.Group("/api/v1")
+
+    // Setup domain-specific routes
+    SetupUserRoutes(api, application.UserHandler)
+    // SetupProductRoutes(api, application.ProductHandler)
+    // SetupOrderRoutes(api, application.OrderHandler)
+    // SetupAuthRoutes(api, application.AuthHandler)
+    // SetupPaymentRoutes(api, application.PaymentHandler)
+}
+```
+
+## 12d. internal/delivery/http/route/user_route.go (User Routes)
 
 ```go
 package route
@@ -667,30 +695,76 @@ import (
     "github.com/gofiber/fiber/v2"
 )
 
-// File ini OPSIONAL karena routing sudah ada di app.go
-// Tapi bisa tetap dipakai jika ingin pisahkan routing logic
-
-func SetupUserRoutes(api fiber.Router, userHandler *handler.UserHandler) {
+// SetupUserRoutes sets up all user-related routes
+func SetupUserRoutes(api fiber.Router, h *handler.UserHandler) {
     users := api.Group("/users")
-    users.Post("/", userHandler.Create)
-    users.Get("/", userHandler.GetAll)
-    users.Get("/:id", userHandler.GetByID)
-    users.Put("/:id", userHandler.Update)
-    users.Delete("/:id", userHandler.Delete)
+    
+    // Public routes
+    users.Get("/", h.GetAll)           // GET /api/v1/users
+    users.Get("/:id", h.GetByID)       // GET /api/v1/users/:id
+    
+    // Protected routes (add auth middleware later)
+    users.Post("/", h.Create)          // POST /api/v1/users
+    users.Put("/:id", h.Update)        // PUT /api/v1/users/:id
+    users.Delete("/:id", h.Delete)     // DELETE /api/v1/users/:id
 }
+```
 
-func SetupProductRoutes(api fiber.Router, productHandler *handler.ProductHandler) {
+## 12e. internal/delivery/http/route/product_route.go (Contoh untuk Domain Lain)
+
+```go
+package route
+
+import (
+    "myapp/internal/delivery/http/handler"
+
+    "github.com/gofiber/fiber/v2"
+)
+
+// SetupProductRoutes sets up all product-related routes
+func SetupProductRoutes(api fiber.Router, h *handler.ProductHandler) {
     products := api.Group("/products")
-    products.Post("/", productHandler.Create)
-    products.Get("/", productHandler.GetAll)
-    products.Get("/:id", productHandler.GetByID)
-    products.Put("/:id", productHandler.Update)
-    products.Delete("/:id", productHandler.Delete)
+    
+    // Public routes
+    products.Get("/", h.GetAll)              // GET /api/v1/products
+    products.Get("/:id", h.GetByID)          // GET /api/v1/products/:id
+    products.Get("/category/:id", h.GetByCategory) // GET /api/v1/products/category/:id
+    products.Get("/search", h.Search)        // GET /api/v1/products/search?q=...
+    
+    // Protected routes (admin only)
+    products.Post("/", h.Create)             // POST /api/v1/products
+    products.Put("/:id", h.Update)           // PUT /api/v1/products/:id
+    products.Delete("/:id", h.Delete)        // DELETE /api/v1/products/:id
+    products.Post("/:id/images", h.UploadImage) // POST /api/v1/products/:id/images
 }
+```
 
-// Bisa dipanggil dari app.go seperti ini:
-// route.SetupUserRoutes(api, app.UserHandler)
-// route.SetupProductRoutes(api, app.ProductHandler)
+## 12f. internal/delivery/http/route/order_route.go (Contoh untuk Domain Lain)
+
+```go
+package route
+
+import (
+    "myapp/internal/delivery/http/handler"
+
+    "github.com/gofiber/fiber/v2"
+)
+
+// SetupOrderRoutes sets up all order-related routes
+func SetupOrderRoutes(api fiber.Router, h *handler.OrderHandler) {
+    orders := api.Group("/orders")
+    
+    // All routes protected (require authentication)
+    orders.Get("/", h.GetMyOrders)           // GET /api/v1/orders
+    orders.Get("/:id", h.GetByID)            // GET /api/v1/orders/:id
+    orders.Post("/", h.Create)               // POST /api/v1/orders
+    orders.Put("/:id/cancel", h.Cancel)      // PUT /api/v1/orders/:id/cancel
+    orders.Get("/:id/invoice", h.GetInvoice) // GET /api/v1/orders/:id/invoice
+    
+    // Admin routes
+    orders.Get("/admin/all", h.GetAllOrders) // GET /api/v1/orders/admin/all
+    orders.Put("/:id/status", h.UpdateStatus) // PUT /api/v1/orders/:id/status
+}
 ```
 
 ## 12. cmd/api/main.go (Clean dengan Dependency Container)
@@ -745,7 +819,7 @@ func main() {
 }
 ```
 
-## 12b. internal/app/app.go (Fixed - No Import Cycle)
+## 12b. internal/app/app.go (Simplified - Delegate to Route Package)
 
 ```go
 package app
@@ -754,6 +828,7 @@ import (
     "fmt"
     "myapp/config"
     "myapp/internal/delivery/http/handler"
+    "myapp/internal/delivery/http/route"
     "myapp/internal/repository/postgres"
     "myapp/internal/repository/postgres/model"
     "myapp/internal/usecase"
@@ -771,7 +846,7 @@ type Application struct {
     Config *config.Config
     DB     *gorm.DB
     
-    // Handlers - langsung struct, bukan pointer ke struct Handlers
+    // Handlers
     UserHandler *handler.UserHandler
     // ProductHandler *handler.ProductHandler
     // OrderHandler   *handler.OrderHandler
@@ -828,32 +903,8 @@ func (app *Application) SetupApp(fiberApp *fiber.App) {
         })
     })
 
-    // Setup routes - pass handlers directly
-    app.setupRoutes(fiberApp)
-}
-
-// setupRoutes is private method in app package - no import cycle!
-func (app *Application) setupRoutes(fiberApp *fiber.App) {
-    api := fiberApp.Group("/api/v1")
-
-    // User routes
-    users := api.Group("/users")
-    users.Post("/", app.UserHandler.Create)
-    users.Get("/", app.UserHandler.GetAll)
-    users.Get("/:id", app.UserHandler.GetByID)
-    users.Put("/:id", app.UserHandler.Update)
-    users.Delete("/:id", app.UserHandler.Delete)
-
-    // Product routes
-    // products := api.Group("/products")
-    // products.Post("/", app.ProductHandler.Create)
-    // products.Get("/", app.ProductHandler.GetAll)
-    // products.Get("/:id", app.ProductHandler.GetByID)
-    
-    // Order routes
-    // orders := api.Group("/orders")
-    // orders.Post("/", app.OrderHandler.Create)
-    // orders.Get("/", app.OrderHandler.GetAll)
+    // Setup routes - delegate to route package
+    route.SetupRoutes(fiberApp, app)
 }
 
 // Close closes all resources
@@ -947,121 +998,119 @@ curl -X PUT http://localhost:3000/api/v1/users/1 \
 curl -X DELETE http://localhost:3000/api/v1/users/1
 ```
 
-## Solusi Import Cycle
+## Solusi Import Cycle dengan Modular Routes
 
-### **Masalah (Import Cycle):**
+### **Arsitektur Baru (Clean & Modular):**
+
+```
+internal/
+├── app/
+│   └── app.go
+│       └── Application struct (holds all handlers)
+│
+└── delivery/http/route/
+    ├── route.go           ← Main router (orchestrator)
+    ├── user_route.go      ← User routes (1 domain, 1 file)
+    ├── product_route.go   ← Product routes
+    └── order_route.go     ← Order routes
+```
+
+### **Dependency Flow (No Cycle!):**
 
 ```
 app.go
-  ↓ imports
-route.go
-  ↓ imports  
-app.Handlers (dari app.go)
-  ↓
-CYCLE! ❌
+  ↓ passes Application to
+route.go (main)
+  ↓ delegates to
+user_route.go, product_route.go, order_route.go
+  ↓ uses
+handler (UserHandler, ProductHandler, etc)
+
+✅ No circular dependency!
 ```
 
-### **Solusi yang Diterapkan:**
+### **Keuntungan Struktur Ini:**
 
-**Opsi 1: Pindahkan Routing ke app.go (RECOMMENDED) ✅**
+1. **✅ Modular**: Setiap domain punya file route sendiri
+2. **✅ Scalable**: Tinggal tambah `xxx_route.go` untuk domain baru
+3. **✅ Clean**: Setiap file fokus ke satu domain
+4. **✅ Easy to navigate**: Developer langsung tahu dimana route untuk User
+5. **✅ No import cycle**: route package hanya import handler, tidak import app
+
+### **Pattern untuk Menambah Domain Baru:**
 
 ```go
-// internal/app/app.go
+// 1. Tambah handler di app.go
 type Application struct {
-    Config      *config.Config
-    DB          *gorm.DB
-    UserHandler *handler.UserHandler // Langsung handler
+    UserHandler    *handler.UserHandler
+    ProductHandler *handler.ProductHandler
+    PaymentHandler *handler.PaymentHandler  // ← New!
 }
 
-func (app *Application) setupRoutes(fiberApp *fiber.App) {
-    api := fiberApp.Group("/api/v1")
-    
-    // Setup routes langsung di sini
-    users := api.Group("/users")
-    users.Post("/", app.UserHandler.Create)
-    users.Get("/", app.UserHandler.GetAll)
-    // ... dll
-}
-```
-
-**Keuntungan:**
-- ✅ No import cycle
-- ✅ Semua wiring di satu tempat
-- ✅ Sederhana dan jelas
-
-**Kekurangan:**
-- ❌ app.go jadi agak panjang jika banyak routes
-
----
-
-**Opsi 2: Route Package Tidak Import app Package (ALTERNATIVE)**
-
-```go
-// internal/delivery/http/route/route.go
+// 2. Buat file payment_route.go
 package route
 
-func SetupUserRoutes(api fiber.Router, userHandler *handler.UserHandler) {
-    // Terima handler langsung, bukan app.Handlers
-    users := api.Group("/users")
-    users.Post("/", userHandler.Create)
-    // ...
+func SetupPaymentRoutes(api fiber.Router, h *handler.PaymentHandler) {
+    payments := api.Group("/payments")
+    payments.Post("/", h.ProcessPayment)
+    payments.Get("/:id/status", h.GetStatus)
 }
 
-// internal/app/app.go
-func (app *Application) setupRoutes(fiberApp *fiber.App) {
+// 3. Register di route.go
+func SetupRoutes(fiberApp *fiber.App, app *app.Application) {
     api := fiberApp.Group("/api/v1")
     
-    // Panggil route helpers
-    route.SetupUserRoutes(api, app.UserHandler)
-    route.SetupProductRoutes(api, app.ProductHandler)
+    SetupUserRoutes(api, app.UserHandler)
+    SetupProductRoutes(api, app.ProductHandler)
+    SetupPaymentRoutes(api, app.PaymentHandler) // ← Add here!
 }
 ```
 
-**Keuntungan:**
-- ✅ No import cycle
-- ✅ Routing logic terpisah
-- ✅ app.go tetap clean
-
----
-
-### **Struktur Akhir (No Cycle):**
+### **Contoh URL Structure:**
 
 ```
-internal/app/
-  └── app.go
-      ├── Application struct (holds handlers)
-      └── setupRoutes() method (private)
+GET  /api/v1/users              → user_route.go
+GET  /api/v1/users/:id          → user_route.go
+POST /api/v1/users              → user_route.go
 
-internal/delivery/http/
-  ├── handler/
-  │   └── user_handler.go
-  └── route/
-      └── route.go (OPSIONAL - helper functions)
+GET  /api/v1/products           → product_route.go
+GET  /api/v1/products/:id       → product_route.go
+GET  /api/v1/products/search    → product_route.go
 
-Dependency Flow:
-app.go → handler.go (OK ✅)
-app.go → route.go (OPSIONAL)
-route.go → handler.go (OK ✅)
-route.go ❌ app.go (TIDAK ADA!)
+GET  /api/v1/orders             → order_route.go
+POST /api/v1/orders             → order_route.go
+GET  /api/v1/orders/:id/invoice → order_route.go
 ```
 
----
+### **Bonus: Route dengan Middleware per Domain**
 
-### **Perbandingan:**
+```go
+// user_route.go
+func SetupUserRoutes(api fiber.Router, h *handler.UserHandler) {
+    users := api.Group("/users")
+    
+    // Public routes
+    users.Get("/", h.GetAll)
+    users.Get("/:id", h.GetByID)
+    
+    // Protected routes with auth middleware
+    protected := users.Group("", authMiddleware)
+    protected.Post("/", h.Create)
+    protected.Put("/:id", h.Update)
+    protected.Delete("/:id", h.Delete)
+}
+```
 
-| Approach | Import Cycle? | File Count | Complexity |
-|----------|---------------|------------|------------|
-| **Routes in app.go** | ✅ No | Fewer | Simple |
-| **Separate route helpers** | ✅ No | More | Modular |
-| **Route imports app** | ❌ **Yes** | More | **BROKEN** |
+### **File Structure Summary:**
 
----
+| File | Purpose | Lines |
+|------|---------|-------|
+| `route.go` | Orchestrator, setup semua routes | ~15-20 |
+| `user_route.go` | User domain routes | ~10-20 |
+| `product_route.go` | Product domain routes | ~15-25 |
+| `order_route.go` | Order domain routes | ~15-25 |
 
-### **Rekomendasi:**
-
-1. **Project Kecil-Menengah**: Opsi 1 (routes di app.go) ✅
-2. **Project Besar**: Opsi 2 (separate route helpers) ✅
-3. **JANGAN**: Route package import app package ❌
+**Scalable sampai 50+ domains!** 🚀
 
 ### **Masalah:**
 ```go
