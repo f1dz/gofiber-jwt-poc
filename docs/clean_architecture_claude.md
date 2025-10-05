@@ -6,11 +6,13 @@
 myapp/
 ├── cmd/
 │   └── api/
-│       └── main.go
+│       └── main.go                    # Clean, hanya 30-40 baris!
 ├── internal/
+│   ├── app/
+│   │   └── app.go                     # Dependency container
 │   ├── domain/
 │   │   ├── entity/
-│   │   │   └── user.go              # Clean entity, no external dependencies
+│   │   │   └── user.go
 │   │   └── repository/
 │   │       └── user_repository.go
 │   ├── usecase/
@@ -26,7 +28,7 @@ myapp/
 │   └── repository/
 │       └── postgres/
 │           ├── model/
-│           │   └── user_model.go    # Database model with GORM tags
+│           │   └── user_model.go
 │           └── user_repository.go
 ├── pkg/
 │   ├── database/
@@ -654,21 +656,32 @@ func (h *UserHandler) Delete(c *fiber.Ctx) error {
 }
 ```
 
-## 11. internal/delivery/http/route/route.go
+## 12c. internal/delivery/http/route/route.go (Updated)
 
 ```go
 package route
 
 import (
+    "myapp/internal/app"
     "myapp/internal/delivery/http/handler"
 
     "github.com/gofiber/fiber/v2"
 )
 
-func SetupRoutes(app *fiber.App, userHandler *handler.UserHandler) {
-    api := app.Group("/api/v1")
+func SetupRoutes(fiberApp *fiber.App, handlers *app.Handlers) {
+    api := fiberApp.Group("/api/v1")
 
     // User routes
+    setupUserRoutes(api, handlers.User)
+    
+    // Product routes (contoh untuk scaling)
+    // setupProductRoutes(api, handlers.Product)
+    
+    // Order routes
+    // setupOrderRoutes(api, handlers.Order)
+}
+
+func setupUserRoutes(api fiber.Router, userHandler *handler.UserHandler) {
     users := api.Group("/users")
     users.Post("/", userHandler.Create)
     users.Get("/", userHandler.GetAll)
@@ -676,9 +689,18 @@ func SetupRoutes(app *fiber.App, userHandler *handler.UserHandler) {
     users.Put("/:id", userHandler.Update)
     users.Delete("/:id", userHandler.Delete)
 }
+
+// func setupProductRoutes(api fiber.Router, productHandler *handler.ProductHandler) {
+//     products := api.Group("/products")
+//     products.Post("/", productHandler.Create)
+//     products.Get("/", productHandler.GetAll)
+//     products.Get("/:id", productHandler.GetByID)
+//     products.Put("/:id", productHandler.Update)
+//     products.Delete("/:id", productHandler.Delete)
+// }
 ```
 
-## 12. cmd/api/main.go
+## 12. cmd/api/main.go (Clean dengan Dependency Container)
 
 ```go
 package main
@@ -686,17 +708,9 @@ package main
 import (
     "log"
     "myapp/config"
-    "myapp/internal/delivery/http/handler"
-    "myapp/internal/delivery/http/route"
-    "myapp/internal/repository/postgres"
-    "myapp/internal/repository/postgres/model"
-    "myapp/internal/usecase"
-    "myapp/pkg/database"
+    "myapp/internal/app"
 
     "github.com/gofiber/fiber/v2"
-    "github.com/gofiber/fiber/v2/middleware/cors"
-    "github.com/gofiber/fiber/v2/middleware/logger"
-    "github.com/gofiber/fiber/v2/middleware/recover"
 )
 
 func main() {
@@ -706,28 +720,15 @@ func main() {
         log.Fatal("Failed to load config:", err)
     }
 
-    // Initialize database
-    db, err := database.NewPostgresDB(cfg.Database)
+    // Initialize application dengan dependency container
+    application, err := app.NewApplication(cfg)
     if err != nil {
-        log.Fatal("Failed to connect to database:", err)
+        log.Fatal("Failed to initialize application:", err)
     }
-
-    // Auto migrate - gunakan database model, bukan entity
-    if err := db.AutoMigrate(&model.UserModel{}); err != nil {
-        log.Fatal("Failed to migrate database:", err)
-    }
-
-    // Initialize repositories
-    userRepo := postgres.NewUserRepository(db)
-
-    // Initialize use cases
-    userUsecase := usecase.NewUserUsecase(userRepo)
-
-    // Initialize handlers
-    userHandler := handler.NewUserHandler(userUsecase)
+    defer application.Close()
 
     // Initialize Fiber app
-    app := fiber.New(fiber.Config{
+    fiberApp := fiber.New(fiber.Config{
         ErrorHandler: func(c *fiber.Ctx, err error) error {
             code := fiber.StatusInternalServerError
             if e, ok := err.(*fiber.Error); ok {
@@ -740,27 +741,190 @@ func main() {
         },
     })
 
-    // Middleware
-    app.Use(recover.New())
-    app.Use(logger.New())
-    app.Use(cors.New())
+    // Setup application (middleware, routes, etc)
+    application.SetupApp(fiberApp)
 
-    // Setup routes
-    route.SetupRoutes(app, userHandler)
+    // Start server
+    log.Printf("Server starting on port %s", cfg.App.Port)
+    if err := fiberApp.Listen(":" + cfg.App.Port); err != nil {
+        log.Fatal("Failed to start server:", err)
+    }
+}
+```
+
+## 12b. internal/app/app.go (Dependency Container)
+
+```go
+package app
+
+import (
+    "fmt"
+    "myapp/config"
+    "myapp/internal/delivery/http/handler"
+    "myapp/internal/delivery/http/route"
+    "myapp/internal/repository/postgres"
+    "myapp/internal/repository/postgres/model"
+    "myapp/internal/usecase"
+    "myapp/pkg/database"
+
+    "github.com/gofiber/fiber/v2"
+    "github.com/gofiber/fiber/v2/middleware/cors"
+    "github.com/gofiber/fiber/v2/middleware/logger"
+    "github.com/gofiber/fiber/v2/middleware/recover"
+    "gorm.io/gorm"
+)
+
+// Application holds all dependencies
+type Application struct {
+    Config   *config.Config
+    DB       *gorm.DB
+    Handlers *Handlers
+}
+
+// Handlers holds all HTTP handlers
+type Handlers struct {
+    User *handler.UserHandler
+    // Product *handler.ProductHandler
+    // Order   *handler.OrderHandler
+    // ... tambahkan handler lain di sini
+}
+
+// NewApplication creates and wires up all dependencies
+func NewApplication(cfg *config.Config) (*Application, error) {
+    // Initialize database
+    db, err := database.NewPostgresDB(cfg.Database)
+    if err != nil {
+        return nil, fmt.Errorf("failed to connect database: %w", err)
+    }
+
+    // Auto migrate
+    if err := db.AutoMigrate(&model.UserModel{}); err != nil {
+        return nil, fmt.Errorf("failed to migrate database: %w", err)
+    }
+
+    // Initialize repositories
+    repos := initRepositories(db)
+
+    // Initialize use cases
+    usecases := initUsecases(repos)
+
+    // Initialize handlers
+    handlers := initHandlers(usecases)
+
+    return &Application{
+        Config:   cfg,
+        DB:       db,
+        Handlers: handlers,
+    }, nil
+}
+
+// Repositories holds all repository instances
+type Repositories struct {
+    User postgres.UserRepository
+    // Product postgres.ProductRepository
+    // Order   postgres.OrderRepository
+}
+
+// Usecases holds all usecase instances
+type Usecases struct {
+    User *usecase.UserUsecase
+    // Product *usecase.ProductUsecase
+    // Order   *usecase.OrderUsecase
+}
+
+func initRepositories(db *gorm.DB) *Repositories {
+    return &Repositories{
+        User: postgres.NewUserRepository(db),
+        // Product: postgres.NewProductRepository(db),
+        // Order:   postgres.NewOrderRepository(db),
+    }
+}
+
+func initUsecases(repos *Repositories) *Usecases {
+    return &Usecases{
+        User: usecase.NewUserUsecase(repos.User),
+        // Product: usecase.NewProductUsecase(repos.Product),
+        // Order:   usecase.NewOrderUsecase(repos.Order, repos.Product),
+    }
+}
+
+func initHandlers(usecases *Usecases) *Handlers {
+    return &Handlers{
+        User: handler.NewUserHandler(usecases.User),
+        // Product: handler.NewProductHandler(usecases.Product),
+        // Order:   handler.NewOrderHandler(usecases.Order),
+    }
+}
+
+// SetupApp configures the Fiber application
+func (app *Application) SetupApp(fiberApp *fiber.App) {
+    // Middleware
+    fiberApp.Use(recover.New())
+    fiberApp.Use(logger.New())
+    fiberApp.Use(cors.New())
 
     // Health check
-    app.Get("/health", func(c *fiber.Ctx) error {
+    fiberApp.Get("/health", func(c *fiber.Ctx) error {
         return c.JSON(fiber.Map{
             "status": "ok",
         })
     })
 
-    // Start server
-    log.Printf("Server starting on port %s", cfg.App.Port)
-    if err := app.Listen(":" + cfg.App.Port); err != nil {
-        log.Fatal("Failed to start server:", err)
-    }
+    // Setup routes
+    route.SetupRoutes(fiberApp, app.Handlers)
 }
+
+// Close closes all resources
+func (app *Application) Close() error {
+    sqlDB, err := app.DB.DB()
+    if err != nil {
+        return err
+    }
+    return sqlDB.Close()
+}
+```
+
+## 12c. internal/delivery/http/route/route.go (Updated)
+
+```go
+package route
+
+import (
+    "myapp/internal/app"
+
+    "github.com/gofiber/fiber/v2"
+)
+
+func SetupRoutes(fiberApp *fiber.App, handlers *app.Handlers) {
+    api := fiberApp.Group("/api/v1")
+
+    // User routes
+    setupUserRoutes(api, handlers.User)
+    
+    // Product routes (contoh untuk scaling)
+    // setupProductRoutes(api, handlers.Product)
+    
+    // Order routes
+    // setupOrderRoutes(api, handlers.Order)
+}
+
+func setupUserRoutes(api fiber.Router, userHandler *handler.UserHandler) {
+    users := api.Group("/users")
+    users.Post("/", userHandler.Create)
+    users.Get("/", userHandler.GetAll)
+    users.Get("/:id", userHandler.GetByID)
+    users.Put("/:id", userHandler.Update)
+    users.Delete("/:id", userHandler.Delete)
+}
+
+// func setupProductRoutes(api fiber.Router, productHandler *handler.ProductHandler) {
+//     products := api.Group("/products")
+//     products.Post("/", productHandler.Create)
+//     products.Get("/", productHandler.GetAll)
+//     products.Get("/:id", productHandler.GetByID)
+//     products.Put("/:id", productHandler.Update)
+//     products.Delete("/:id", productHandler.Delete)
+// }
 ```
 
 ## Cara Menjalankan
@@ -801,7 +965,197 @@ curl -X PUT http://localhost:3000/api/v1/users/1 \
 curl -X DELETE http://localhost:3000/api/v1/users/1
 ```
 
-## Penjelasan Clean Architecture
+## Solusi untuk Main.go yang Panjang
+
+### **Masalah:**
+```go
+// main.go akan jadi seperti ini jika aplikasi besar:
+func main() {
+    // 50+ baris config
+    // 100+ baris repository initialization
+    // 100+ baris usecase initialization  
+    // 100+ baris handler initialization
+    // Total: 300-500+ baris! 😱
+}
+```
+
+### **Solusi 1: Dependency Container Pattern (Yang Saya Terapkan) ✅**
+
+**Keuntungan:**
+- ✅ `main.go` tetap clean (~30-40 baris)
+- ✅ Semua dependency wiring di satu tempat (`internal/app/app.go`)
+- ✅ Mudah di-maintain dan di-test
+- ✅ Clear separation: setup vs runtime
+- ✅ Easy to add new features (tinggal tambah di container)
+
+**Struktur:**
+```
+main.go (30 baris)
+    ↓ calls
+app.Application (dependency container)
+    ↓ initializes
+    ├── Repositories
+    ├── Usecases
+    └── Handlers
+```
+
+**Contoh Scaling (Aplikasi Besar):**
+```go
+// internal/app/app.go
+type Repositories struct {
+    User     postgres.UserRepository
+    Product  postgres.ProductRepository
+    Order    postgres.OrderRepository
+    Payment  postgres.PaymentRepository
+    Shipping postgres.ShippingRepository
+    // ... 50 repositories lainnya
+}
+
+type Usecases struct {
+    User     *usecase.UserUsecase
+    Product  *usecase.ProductUsecase
+    Order    *usecase.OrderUsecase
+    // ... 50 usecases lainnya
+}
+
+type Handlers struct {
+    User    *handler.UserHandler
+    Product *handler.ProductHandler
+    Order   *handler.OrderHandler
+    // ... 50 handlers lainnya
+}
+
+// main.go tetap 30 baris! 🎉
+```
+
+---
+
+### **Solusi 2: Wire (Google's Dependency Injection)**
+
+Untuk project yang sangat besar, bisa pakai [Wire](https://github.com/google/wire):
+
+```go
+// wire.go
+//go:build wireinject
+// +build wireinject
+
+package main
+
+import (
+    "github.com/google/wire"
+    "myapp/internal/repository/postgres"
+    "myapp/internal/usecase"
+    "myapp/internal/delivery/http/handler"
+)
+
+func InitializeApp(cfg *config.Config) (*Application, error) {
+    wire.Build(
+        // Database
+        database.NewPostgresDB,
+        
+        // Repositories
+        postgres.NewUserRepository,
+        postgres.NewProductRepository,
+        
+        // Usecases
+        usecase.NewUserUsecase,
+        usecase.NewProductUsecase,
+        
+        // Handlers
+        handler.NewUserHandler,
+        handler.NewProductHandler,
+        
+        // Application
+        NewApplication,
+    )
+    return nil, nil
+}
+```
+
+Wire akan **generate code otomatis** untuk dependency injection!
+
+---
+
+### **Solusi 3: Uber's Fx (Dependency Injection Framework)**
+
+Untuk yang suka framework-based:
+
+```go
+package main
+
+import (
+    "go.uber.org/fx"
+    "myapp/internal/repository/postgres"
+    "myapp/internal/usecase"
+    "myapp/internal/delivery/http/handler"
+)
+
+func main() {
+    fx.New(
+        // Provide dependencies
+        fx.Provide(
+            config.LoadConfig,
+            database.NewPostgresDB,
+            postgres.NewUserRepository,
+            usecase.NewUserUsecase,
+            handler.NewUserHandler,
+            // ... dll
+        ),
+        
+        // Invoke startup
+        fx.Invoke(startServer),
+    ).Run()
+}
+```
+
+---
+
+### **Perbandingan:**
+
+| Solusi | Kompleksitas | Best For | Learning Curve |
+|--------|--------------|----------|----------------|
+| **Manual Container** | Simple | Small-Medium projects | Easy ⭐ |
+| **Wire (Google)** | Medium | Large projects | Medium ⭐⭐ |
+| **Fx (Uber)** | Complex | Enterprise projects | Hard ⭐⭐⭐ |
+
+---
+
+### **Rekomendasi:**
+
+1. **Project Kecil-Menengah (1-20 domains)**: 
+   - ✅ Manual Container Pattern (yang saya implementasikan)
+   
+2. **Project Besar (20-50 domains)**:
+   - ✅ Wire (code generation)
+   
+3. **Project Enterprise (50+ domains)**:
+   - ✅ Fx atau custom DI framework
+
+---
+
+### **Best Practices:**
+
+```go
+// ✅ GOOD: Grouping dependencies
+type Repositories struct {
+    User    UserRepository
+    Product ProductRepository
+}
+
+type Usecases struct {
+    User    *UserUsecase
+    Product *ProductUsecase
+}
+
+// ❌ BAD: Flat structure
+type Application struct {
+    UserRepo    UserRepository
+    ProductRepo ProductRepository
+    UserUC      *UserUsecase
+    ProductUC   *ProductUsecase
+    // ... 100 fields! 😱
+}
+```
 
 **Perubahan Penting - Usecase yang Benar-benar Clean:**
 
