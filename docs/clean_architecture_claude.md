@@ -1,4 +1,4 @@
-# Go Fiber + GORM Clean Architecture Project
+# Go Fiber + GORM Clean Architecture Project## Penjelasan Clean Architecture (Updated)
 
 ## Struktur Direktori
 
@@ -656,32 +656,21 @@ func (h *UserHandler) Delete(c *fiber.Ctx) error {
 }
 ```
 
-## 12c. internal/delivery/http/route/route.go (Updated)
+## 12c. internal/delivery/http/route/route.go (OPSIONAL - Bisa Dihapus)
 
 ```go
 package route
 
 import (
-    "myapp/internal/app"
     "myapp/internal/delivery/http/handler"
 
     "github.com/gofiber/fiber/v2"
 )
 
-func SetupRoutes(fiberApp *fiber.App, handlers *app.Handlers) {
-    api := fiberApp.Group("/api/v1")
+// File ini OPSIONAL karena routing sudah ada di app.go
+// Tapi bisa tetap dipakai jika ingin pisahkan routing logic
 
-    // User routes
-    setupUserRoutes(api, handlers.User)
-    
-    // Product routes (contoh untuk scaling)
-    // setupProductRoutes(api, handlers.Product)
-    
-    // Order routes
-    // setupOrderRoutes(api, handlers.Order)
-}
-
-func setupUserRoutes(api fiber.Router, userHandler *handler.UserHandler) {
+func SetupUserRoutes(api fiber.Router, userHandler *handler.UserHandler) {
     users := api.Group("/users")
     users.Post("/", userHandler.Create)
     users.Get("/", userHandler.GetAll)
@@ -690,14 +679,18 @@ func setupUserRoutes(api fiber.Router, userHandler *handler.UserHandler) {
     users.Delete("/:id", userHandler.Delete)
 }
 
-// func setupProductRoutes(api fiber.Router, productHandler *handler.ProductHandler) {
-//     products := api.Group("/products")
-//     products.Post("/", productHandler.Create)
-//     products.Get("/", productHandler.GetAll)
-//     products.Get("/:id", productHandler.GetByID)
-//     products.Put("/:id", productHandler.Update)
-//     products.Delete("/:id", productHandler.Delete)
-// }
+func SetupProductRoutes(api fiber.Router, productHandler *handler.ProductHandler) {
+    products := api.Group("/products")
+    products.Post("/", productHandler.Create)
+    products.Get("/", productHandler.GetAll)
+    products.Get("/:id", productHandler.GetByID)
+    products.Put("/:id", productHandler.Update)
+    products.Delete("/:id", productHandler.Delete)
+}
+
+// Bisa dipanggil dari app.go seperti ini:
+// route.SetupUserRoutes(api, app.UserHandler)
+// route.SetupProductRoutes(api, app.ProductHandler)
 ```
 
 ## 12. cmd/api/main.go (Clean dengan Dependency Container)
@@ -752,7 +745,7 @@ func main() {
 }
 ```
 
-## 12b. internal/app/app.go (Dependency Container)
+## 12b. internal/app/app.go (Fixed - No Import Cycle)
 
 ```go
 package app
@@ -761,7 +754,6 @@ import (
     "fmt"
     "myapp/config"
     "myapp/internal/delivery/http/handler"
-    "myapp/internal/delivery/http/route"
     "myapp/internal/repository/postgres"
     "myapp/internal/repository/postgres/model"
     "myapp/internal/usecase"
@@ -776,17 +768,13 @@ import (
 
 // Application holds all dependencies
 type Application struct {
-    Config   *config.Config
-    DB       *gorm.DB
-    Handlers *Handlers
-}
-
-// Handlers holds all HTTP handlers
-type Handlers struct {
-    User *handler.UserHandler
-    // Product *handler.ProductHandler
-    // Order   *handler.OrderHandler
-    // ... tambahkan handler lain di sini
+    Config *config.Config
+    DB     *gorm.DB
+    
+    // Handlers - langsung struct, bukan pointer ke struct Handlers
+    UserHandler *handler.UserHandler
+    // ProductHandler *handler.ProductHandler
+    // OrderHandler   *handler.OrderHandler
 }
 
 // NewApplication creates and wires up all dependencies
@@ -803,57 +791,27 @@ func NewApplication(cfg *config.Config) (*Application, error) {
     }
 
     // Initialize repositories
-    repos := initRepositories(db)
+    userRepo := postgres.NewUserRepository(db)
+    // productRepo := postgres.NewProductRepository(db)
+    // orderRepo := postgres.NewOrderRepository(db)
 
     // Initialize use cases
-    usecases := initUsecases(repos)
+    userUsecase := usecase.NewUserUsecase(userRepo)
+    // productUsecase := usecase.NewProductUsecase(productRepo)
+    // orderUsecase := usecase.NewOrderUsecase(orderRepo, productRepo)
 
     // Initialize handlers
-    handlers := initHandlers(usecases)
+    userHandler := handler.NewUserHandler(userUsecase)
+    // productHandler := handler.NewProductHandler(productUsecase)
+    // orderHandler := handler.NewOrderHandler(orderUsecase)
 
     return &Application{
-        Config:   cfg,
-        DB:       db,
-        Handlers: handlers,
+        Config:      cfg,
+        DB:          db,
+        UserHandler: userHandler,
+        // ProductHandler: productHandler,
+        // OrderHandler:   orderHandler,
     }, nil
-}
-
-// Repositories holds all repository instances
-type Repositories struct {
-    User postgres.UserRepository
-    // Product postgres.ProductRepository
-    // Order   postgres.OrderRepository
-}
-
-// Usecases holds all usecase instances
-type Usecases struct {
-    User *usecase.UserUsecase
-    // Product *usecase.ProductUsecase
-    // Order   *usecase.OrderUsecase
-}
-
-func initRepositories(db *gorm.DB) *Repositories {
-    return &Repositories{
-        User: postgres.NewUserRepository(db),
-        // Product: postgres.NewProductRepository(db),
-        // Order:   postgres.NewOrderRepository(db),
-    }
-}
-
-func initUsecases(repos *Repositories) *Usecases {
-    return &Usecases{
-        User: usecase.NewUserUsecase(repos.User),
-        // Product: usecase.NewProductUsecase(repos.Product),
-        // Order:   usecase.NewOrderUsecase(repos.Order, repos.Product),
-    }
-}
-
-func initHandlers(usecases *Usecases) *Handlers {
-    return &Handlers{
-        User: handler.NewUserHandler(usecases.User),
-        // Product: handler.NewProductHandler(usecases.Product),
-        // Order:   handler.NewOrderHandler(usecases.Order),
-    }
 }
 
 // SetupApp configures the Fiber application
@@ -870,8 +828,32 @@ func (app *Application) SetupApp(fiberApp *fiber.App) {
         })
     })
 
-    // Setup routes
-    route.SetupRoutes(fiberApp, app.Handlers)
+    // Setup routes - pass handlers directly
+    app.setupRoutes(fiberApp)
+}
+
+// setupRoutes is private method in app package - no import cycle!
+func (app *Application) setupRoutes(fiberApp *fiber.App) {
+    api := fiberApp.Group("/api/v1")
+
+    // User routes
+    users := api.Group("/users")
+    users.Post("/", app.UserHandler.Create)
+    users.Get("/", app.UserHandler.GetAll)
+    users.Get("/:id", app.UserHandler.GetByID)
+    users.Put("/:id", app.UserHandler.Update)
+    users.Delete("/:id", app.UserHandler.Delete)
+
+    // Product routes
+    // products := api.Group("/products")
+    // products.Post("/", app.ProductHandler.Create)
+    // products.Get("/", app.ProductHandler.GetAll)
+    // products.Get("/:id", app.ProductHandler.GetByID)
+    
+    // Order routes
+    // orders := api.Group("/orders")
+    // orders.Post("/", app.OrderHandler.Create)
+    // orders.Get("/", app.OrderHandler.GetAll)
 }
 
 // Close closes all resources
@@ -965,7 +947,121 @@ curl -X PUT http://localhost:3000/api/v1/users/1 \
 curl -X DELETE http://localhost:3000/api/v1/users/1
 ```
 
-## Solusi untuk Main.go yang Panjang
+## Solusi Import Cycle
+
+### **Masalah (Import Cycle):**
+
+```
+app.go
+  ↓ imports
+route.go
+  ↓ imports  
+app.Handlers (dari app.go)
+  ↓
+CYCLE! ❌
+```
+
+### **Solusi yang Diterapkan:**
+
+**Opsi 1: Pindahkan Routing ke app.go (RECOMMENDED) ✅**
+
+```go
+// internal/app/app.go
+type Application struct {
+    Config      *config.Config
+    DB          *gorm.DB
+    UserHandler *handler.UserHandler // Langsung handler
+}
+
+func (app *Application) setupRoutes(fiberApp *fiber.App) {
+    api := fiberApp.Group("/api/v1")
+    
+    // Setup routes langsung di sini
+    users := api.Group("/users")
+    users.Post("/", app.UserHandler.Create)
+    users.Get("/", app.UserHandler.GetAll)
+    // ... dll
+}
+```
+
+**Keuntungan:**
+- ✅ No import cycle
+- ✅ Semua wiring di satu tempat
+- ✅ Sederhana dan jelas
+
+**Kekurangan:**
+- ❌ app.go jadi agak panjang jika banyak routes
+
+---
+
+**Opsi 2: Route Package Tidak Import app Package (ALTERNATIVE)**
+
+```go
+// internal/delivery/http/route/route.go
+package route
+
+func SetupUserRoutes(api fiber.Router, userHandler *handler.UserHandler) {
+    // Terima handler langsung, bukan app.Handlers
+    users := api.Group("/users")
+    users.Post("/", userHandler.Create)
+    // ...
+}
+
+// internal/app/app.go
+func (app *Application) setupRoutes(fiberApp *fiber.App) {
+    api := fiberApp.Group("/api/v1")
+    
+    // Panggil route helpers
+    route.SetupUserRoutes(api, app.UserHandler)
+    route.SetupProductRoutes(api, app.ProductHandler)
+}
+```
+
+**Keuntungan:**
+- ✅ No import cycle
+- ✅ Routing logic terpisah
+- ✅ app.go tetap clean
+
+---
+
+### **Struktur Akhir (No Cycle):**
+
+```
+internal/app/
+  └── app.go
+      ├── Application struct (holds handlers)
+      └── setupRoutes() method (private)
+
+internal/delivery/http/
+  ├── handler/
+  │   └── user_handler.go
+  └── route/
+      └── route.go (OPSIONAL - helper functions)
+
+Dependency Flow:
+app.go → handler.go (OK ✅)
+app.go → route.go (OPSIONAL)
+route.go → handler.go (OK ✅)
+route.go ❌ app.go (TIDAK ADA!)
+```
+
+---
+
+### **Perbandingan:**
+
+| Approach | Import Cycle? | File Count | Complexity |
+|----------|---------------|------------|------------|
+| **Routes in app.go** | ✅ No | Fewer | Simple |
+| **Separate route helpers** | ✅ No | More | Modular |
+| **Route imports app** | ❌ **Yes** | More | **BROKEN** |
+
+---
+
+### **Rekomendasi:**
+
+1. **Project Kecil-Menengah**: Opsi 1 (routes di app.go) ✅
+2. **Project Besar**: Opsi 2 (separate route helpers) ✅
+3. **JANGAN**: Route package import app package ❌
 
 ### **Masalah:**
 ```go
