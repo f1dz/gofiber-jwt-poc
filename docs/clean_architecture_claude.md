@@ -444,7 +444,7 @@ func (r *userRepository) handleError(err error) error {
 }
 ```
 
-## 9. internal/usecase/user_usecase.go (Clean - Tanpa GORM)
+## 9. internal/usecase/user_usecase.go (Versi Pragmatis - Tanpa Interface)
 
 ```go
 package usecase
@@ -462,37 +462,29 @@ var (
     ErrInvalidInput      = errors.New("invalid input")
 )
 
-type UserUsecase interface {
-    Create(ctx context.Context, user *entity.User) error
-    GetByID(ctx context.Context, id uint) (*entity.User, error)
-    GetAll(ctx context.Context) ([]entity.User, error)
-    Update(ctx context.Context, user *entity.User) error
-    Delete(ctx context.Context, id uint) error
-}
-
-type userUsecase struct {
+// Tidak perlu interface jika hanya ada 1 implementasi
+// Langsung pakai struct saja
+type UserUsecase struct {
     userRepo repository.UserRepository
 }
 
-func NewUserUsecase(userRepo repository.UserRepository) UserUsecase {
-    return &userUsecase{
+func NewUserUsecase(userRepo repository.UserRepository) *UserUsecase {
+    return &UserUsecase{
         userRepo: userRepo,
     }
 }
 
-func (u *userUsecase) Create(ctx context.Context, user *entity.User) error {
+func (u *UserUsecase) Create(ctx context.Context, user *entity.User) error {
     // Business logic validation
     if user.Name == "" || user.Email == "" {
         return ErrInvalidInput
     }
 
     // Check if email already exists
-    // Repository harus return error yang jelas (bukan GORM error)
     _, err := u.userRepo.FindByEmail(ctx, user.Email)
     if err == nil {
         return ErrEmailAlreadyExists
     }
-    // Jika error bukan "not found", berarti error lain
     if err != repository.ErrNotFound {
         return err
     }
@@ -500,11 +492,9 @@ func (u *userUsecase) Create(ctx context.Context, user *entity.User) error {
     return u.userRepo.Create(ctx, user)
 }
 
-func (u *userUsecase) GetByID(ctx context.Context, id uint) (*entity.User, error) {
+func (u *UserUsecase) GetByID(ctx context.Context, id uint) (*entity.User, error) {
     user, err := u.userRepo.FindByID(ctx, id)
     if err != nil {
-        // Usecase tidak tahu tentang GORM errors
-        // Repository bertanggung jawab convert GORM error ke domain error
         if err == repository.ErrNotFound {
             return nil, ErrUserNotFound
         }
@@ -513,17 +503,15 @@ func (u *userUsecase) GetByID(ctx context.Context, id uint) (*entity.User, error
     return user, nil
 }
 
-func (u *userUsecase) GetAll(ctx context.Context) ([]entity.User, error) {
+func (u *UserUsecase) GetAll(ctx context.Context) ([]entity.User, error) {
     return u.userRepo.FindAll(ctx)
 }
 
-func (u *userUsecase) Update(ctx context.Context, user *entity.User) error {
-    // Business logic: validate input
+func (u *UserUsecase) Update(ctx context.Context, user *entity.User) error {
     if user.Name == "" || user.Email == "" {
         return ErrInvalidInput
     }
 
-    // Check if user exists
     _, err := u.userRepo.FindByID(ctx, user.ID)
     if err != nil {
         if err == repository.ErrNotFound {
@@ -535,8 +523,7 @@ func (u *userUsecase) Update(ctx context.Context, user *entity.User) error {
     return u.userRepo.Update(ctx, user)
 }
 
-func (u *userUsecase) Delete(ctx context.Context, id uint) error {
-    // Check if user exists
+func (u *UserUsecase) Delete(ctx context.Context, id uint) error {
     _, err := u.userRepo.FindByID(ctx, id)
     if err != nil {
         if err == repository.ErrNotFound {
@@ -548,6 +535,12 @@ func (u *userUsecase) Delete(ctx context.Context, id uint) error {
     return u.userRepo.Delete(ctx, id)
 }
 ```
+
+**Catatan:**
+- Tidak ada interface `UserUsecase`, langsung pakai struct `*UserUsecase`
+- Tetap bisa di-test dengan mock repository
+- Lebih sederhana dan pragmatis
+- Cocok untuk mayoritas use case
 
 ## 10. internal/delivery/http/handler/user_handler.go
 
@@ -564,10 +557,10 @@ import (
 )
 
 type UserHandler struct {
-    userUsecase usecase.UserUsecase
+    userUsecase *usecase.UserUsecase // ← Pakai concrete struct
 }
 
-func NewUserHandler(userUsecase usecase.UserUsecase) *UserHandler {
+func NewUserHandler(userUsecase *usecase.UserUsecase) *UserHandler {
     return &UserHandler{
         userUsecase: userUsecase,
     }
@@ -591,6 +584,7 @@ func (h *UserHandler) Create(c *fiber.Ctx) error {
         Password: req.Password, // In production, hash this password!
     }
 
+    // Pakai concrete struct, bukan interface
     if err := h.userUsecase.Create(c.Context(), user); err != nil {
         return response.BadRequest(c, "Failed to create user", err)
     }
